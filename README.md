@@ -153,17 +153,24 @@ Invoke-RestMethod http://localhost:4000/models -Headers @{
 
 Provider errors remain visible in local LiteLLM logs. Do not replace them with custom generic middleware.
 
-## Future Vercel deployment
+## Vercel deployment
 
-Do not deploy this milestone yet. Official LiteLLM-on-Vercel support uses a Python entry point like `app.py` and this config file. Before deployment:
+The gateway is deployed on Vercel using `app.py` as the Python entry point and this config file. Deployment rules:
 
-- configure `GEMINI_API_KEY` and `LITELLM_MASTER_KEY` as Vercel server environment variables;
-- configure `OPENROUTER_API_KEY` as a Vercel server environment variable;
+- `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, and `LITELLM_MASTER_KEY` are Vercel server environment variables;
 - use a strong `sk-` proxy key and rotate it if exposed;
-- confirm Vercel Python runtime and request-duration limits for the selected plan;
-- test cold starts, tool/function-calling pass-through, timeouts, and provider errors;
-- keep the gateway URL and key only in the Supabase Edge Function;
+- the Vercel function max duration must be at least 60s (the Edge Function aborts gateway calls after 55s);
+- keep the gateway URL and key only in the Supabase Edge Function (`LITELLM_BASE_URL`, `LITELLM_API_KEY`);
 - never call the gateway directly from the browser.
+
+Open verification items:
+
+- tool/function-calling round-trip on the OpenRouter fallback model (required before AI V2 Phase C);
+- cold-start latency after idle.
+
+## Timeouts and retries
+
+Each deployment has `timeout: 15` seconds and `router_settings.num_retries: 1`. The worst case stays under the Edge Function's 55s gateway timeout. If you add deployments or raise these values, keep the total below that limit.
 
 Current routing shape:
 
@@ -203,4 +210,4 @@ carebridge-liteLLM/
 
 ## Next milestone
 
-Build the minimal Supabase Edge Function adapter: authenticate the CareBridge user, apply role/tool policy, call this gateway with `model = "carebridge-agent"`, and return a provider-neutral response. Do not add clinic tools until that boundary is tested.
+The Supabase Edge Function `carebridge-ai-v2` (AI V2 Phase B) calls this gateway with `model = "carebridge-agent"`. Do not add clinic tools until that boundary is tested end to end.
