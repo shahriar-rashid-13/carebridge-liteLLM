@@ -1,0 +1,10 @@
+# CareBridge model gateway.
+# Add future deployments under the same model_name to enable routing/fallbacks.
+model_list:
+  - model_name: carebridge-agent
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
