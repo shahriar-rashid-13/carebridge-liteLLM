@@ -1,2 +1,2 @@
-litellm[proxy]==1.74.0
+litellm[proxy]==1.103.0
 python-dotenv==1.0.1

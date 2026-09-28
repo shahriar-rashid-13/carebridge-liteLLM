@@ -1,27 +1,26 @@
 # CareBridge model gateway.
-# Add future deployments under the same model_name to enable routing/fallbacks.
-# Worst case per request: (1 + num_retries) attempts on the primary plus the
-# fallback, each capped by timeout. Keep the total below the Edge Function's
-# 55s gateway timeout.
+# The application only calls `carebridge-agent`. Each deployment has its own
+# model group so routing is deterministic: Gemini always serves first and the
+# fallback group is used only when the primary fails.
+# Worst case per request: primary timeout + fallback timeout. Keep the total
+# below the Edge Function's 55s gateway timeout.
 model_list:
-  # Primary deployment.
   - model_name: carebridge-agent
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY
-      order: 1
-      timeout: 15
+      timeout: 20
 
-  # Native LiteLLM failover deployment in the same model group.
-  - model_name: carebridge-agent
+  - model_name: carebridge-agent-fallback
     litellm_params:
       model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
       api_key: os.environ/OPENROUTER_API_KEY
-      order: 2
-      timeout: 15
+      timeout: 20
 
 router_settings:
-  num_retries: 1
+  num_retries: 0
+  fallbacks:
+    - carebridge-agent: ["carebridge-agent-fallback"]
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

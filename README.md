@@ -18,12 +18,14 @@ LiteLLM must never connect to Supabase, authenticate CareBridge users, execute t
 
 ## Current configuration
 
-| Application model | Provider model | Order |
+| Model group | Provider model | Role |
 | --- | --- | --- |
-| `carebridge-agent` | `gemini/gemini-3.1-flash-lite` | 1 |
-| `carebridge-agent` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` | 2 |
+| `carebridge-agent` | `gemini/gemini-3.1-flash-lite` | Primary (called by the application) |
+| `carebridge-agent-fallback` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` | Fallback only |
 
-`litellm_config.yaml` is the routing source of truth. It contains no credentials. Both deployments share one client-facing model group. LiteLLM tries Gemini first, then OpenRouter when Gemini fails.
+`litellm_config.yaml` is the routing source of truth. It contains no credentials. Each deployment has its own model group, and `router_settings.fallbacks` sends a failed `carebridge-agent` request to `carebridge-agent-fallback`. Do not put both deployments under one model group: LiteLLM then load-balances between them instead of treating one as a fallback.
+
+Test a tool round-trip on both model groups with `tests/test_tool_roundtrip.ps1`. Gemini 3 tool calling needs thought signatures passed back between steps; LiteLLM 1.103.0 handles this, older pins may not.
 
 ## Windows setup
 
@@ -170,19 +172,17 @@ Open verification items:
 
 ## Timeouts and retries
 
-Each deployment has `timeout: 15` seconds and `router_settings.num_retries: 1`. The worst case stays under the Edge Function's 55s gateway timeout. If you add deployments or raise these values, keep the total below that limit.
+Each deployment has `timeout: 20` seconds and `router_settings.num_retries: 0`, so the worst case is primary timeout plus fallback timeout (40s). This stays under the Edge Function's 55s gateway timeout. If you add fallbacks or raise these values, keep the total below that limit.
 
 Current routing shape:
 
 ```text
-carebridge-agent
-    ↓
-Primary Gemini (order 1)
-    ↓
-OpenRouter fallback (order 2)
+carebridge-agent (Gemini)
+    ↓ on failure
+carebridge-agent-fallback (OpenRouter)
 ```
 
-LiteLLM native deployment ordering handles failover. No custom fallback code exists in `app.py`.
+LiteLLM `router_settings.fallbacks` handles failover. No custom fallback code exists in `app.py`.
 
 ## Project structure
 
