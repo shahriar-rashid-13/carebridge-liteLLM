@@ -18,11 +18,12 @@ LiteLLM must never connect to Supabase, authenticate CareBridge users, execute t
 
 ## Current configuration
 
-| Application model | Provider model |
-| --- | --- |
-| `carebridge-agent` | `gemini/gemini-3.1-flash-lite` |
+| Application model | Provider model | Order |
+| --- | --- | --- |
+| `carebridge-agent` | `gemini/gemini-3.1-flash-lite` | 1 |
+| `carebridge-agent` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` | 2 |
 
-`litellm_config.yaml` is the routing source of truth. It contains no credentials. The first milestone has one deployment and no fallback entries. Later providers can be added under the same alias without changing CareBridge application code.
+`litellm_config.yaml` is the routing source of truth. It contains no credentials. Both deployments share one client-facing model group. LiteLLM tries Gemini first, then OpenRouter when Gemini fails.
 
 ## Windows setup
 
@@ -60,12 +61,21 @@ If PowerShell blocks activation, run:
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-Copy `.env.example` to `.env` and set real local values:
+Open `.env` and set real local values:
 
 ```text
 GEMINI_API_KEY=your Google AI Studio key
 LITELLM_MASTER_KEY=sk-a-long-random-client-key
 ```
+
+Generate a proxy key with Python:
+
+```bat
+python -c "import secrets; print('sk-' + secrets.token_urlsafe(32))"
+```
+
+Copy generated value into `LITELLM_MASTER_KEY`. Create this key yourself.
+LiteLLM does not issue it.
 
 Keep both keys server-side. `LITELLM_MASTER_KEY` authenticates clients to LiteLLM. `GEMINI_API_KEY` authenticates LiteLLM to Gemini. Never use one as the other. Never commit `.env`.
 
@@ -87,9 +97,10 @@ Keep the proxy terminal running. In a second PowerShell terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-$env:LITELLM_MASTER_KEY = "the same value from .env"
 python tests\test_proxy.py
 ```
+
+The test client loads `LITELLM_MASTER_KEY` from `.env`.
 
 The test checks:
 
@@ -147,25 +158,24 @@ Provider errors remain visible in local LiteLLM logs. Do not replace them with c
 Do not deploy this milestone yet. Official LiteLLM-on-Vercel support uses a Python entry point like `app.py` and this config file. Before deployment:
 
 - configure `GEMINI_API_KEY` and `LITELLM_MASTER_KEY` as Vercel server environment variables;
+- configure `OPENROUTER_API_KEY` as a Vercel server environment variable;
 - use a strong `sk-` proxy key and rotate it if exposed;
 - confirm Vercel Python runtime and request-duration limits for the selected plan;
 - test cold starts, tool/function-calling pass-through, timeouts, and provider errors;
 - keep the gateway URL and key only in the Supabase Edge Function;
 - never call the gateway directly from the browser.
 
-Future routing shape:
+Current routing shape:
 
 ```text
 carebridge-agent
     ↓
-Primary Gemini
+Primary Gemini (order 1)
     ↓
-Fallback 1
-    ↓
-Fallback 2
+OpenRouter fallback (order 2)
 ```
 
-Fallbacks are intentionally not configured now.
+LiteLLM native deployment ordering handles failover. No custom fallback code exists in `app.py`.
 
 ## Project structure
 

@@ -10,6 +10,9 @@ import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BASE_URL = os.getenv("LITELLM_BASE_URL", "http://localhost:4000").rstrip("/")
 PROXY_KEY = os.getenv("LITELLM_MASTER_KEY", "")
