@@ -17,6 +17,15 @@ model_list:
       api_key: os.environ/OPENROUTER_API_KEY
       timeout: 20
 
+  # Embeddings for the RAG corpus. Documents and queries must use this same
+  # model and dimension; changing either requires re-embedding the corpus.
+  - model_name: carebridge-embed
+    litellm_params:
+      model: gemini/gemini-embedding-001
+      api_key: os.environ/GEMINI_API_KEY
+      dimensions: 768
+      timeout: 20
+
 router_settings:
   num_retries: 0
   fallbacks:

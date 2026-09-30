@@ -22,6 +22,7 @@ LiteLLM must never connect to Supabase, authenticate CareBridge users, execute t
 | --- | --- | --- |
 | `carebridge-agent` | `gemini/gemini-3.1-flash-lite` | Primary (called by the application) |
 | `carebridge-agent-fallback` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` | Fallback only |
+| `carebridge-embed` | `gemini/gemini-embedding-001` (768 dimensions) | Embeddings for the RAG corpus and queries (`/embeddings`) |
 
 `litellm_config.yaml` is the routing source of truth. It contains no credentials. Each deployment has its own model group, and `router_settings.fallbacks` sends a failed `carebridge-agent` request to `carebridge-agent-fallback`. Do not put both deployments under one model group: LiteLLM then load-balances between them instead of treating one as a fallback.
 
