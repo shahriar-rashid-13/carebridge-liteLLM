@@ -33,6 +33,10 @@ model_list:
       model: openrouter/qwen/qwen3.8-27b:free
       api_key: os.environ/OPENROUTER_API_KEY_2
       timeout: 12
+      # With reasoning on, a single tool call takes over 20s, beyond the timeout.
+      extra_body:
+        reasoning:
+          enabled: false
 
   # Embeddings for the RAG corpus. Documents and queries must use this same
   # model and dimension; changing either requires re-embedding the corpus.
