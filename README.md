@@ -22,10 +22,11 @@ LiteLLM must never connect to Supabase, authenticate CareBridge users, execute t
 | --- | --- | --- |
 | `carebridge-agent` | `gemini/gemini-3.1-flash-lite` | Primary (called by the application) |
 | `carebridge-agent-retry` | `gemini/gemini-3.1-flash-lite` | First fallback: one Gemini retry for short-lived 503 "high demand" errors |
-| `carebridge-agent-fallback` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` | Last fallback |
+| `carebridge-agent-fallback` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` | Second fallback |
+| `carebridge-agent-fallback-2` | `openrouter/qwen/qwen3.8-27b:free` (key `OPENROUTER_API_KEY_2`) | Last fallback |
 | `carebridge-embed` | `gemini/gemini-embedding-001` (768 dimensions) | Embeddings for the RAG corpus and queries (`/embeddings`) |
 
-`litellm_config.yaml` is the routing source of truth. It contains no credentials. Each deployment has its own model group, and `router_settings.fallbacks` sends a failed `carebridge-agent` request to `carebridge-agent-retry`, then to `carebridge-agent-fallback`. Do not put both deployments under one model group: LiteLLM then load-balances between them instead of treating one as a fallback.
+`litellm_config.yaml` is the routing source of truth. It contains no credentials. Each deployment has its own model group, and `router_settings.fallbacks` sends a failed `carebridge-agent` request to `carebridge-agent-retry`, then `carebridge-agent-fallback`, then `carebridge-agent-fallback-2`. A failed direct `carebridge-agent-fallback` request goes to `carebridge-agent-fallback-2`. Do not put both deployments under one model group: LiteLLM then load-balances between them instead of treating one as a fallback.
 
 Test a tool round-trip on both model groups with `tests/test_tool_roundtrip.ps1`. Gemini 3 tool calling needs thought signatures passed back between steps; LiteLLM 1.103.0 handles this, older pins may not.
 
@@ -174,7 +175,7 @@ Open verification items:
 
 ## Timeouts and retries
 
-Each chat deployment has `timeout: 15` seconds and `router_settings.num_retries: 0`, so the worst case is primary, retry, and fallback timeouts (45s). This stays under the Edge Function's 55s gateway timeout. If you add fallbacks or raise these values, keep the total below that limit.
+Each chat deployment has `timeout: 12` seconds and `router_settings.num_retries: 0`, so the worst case is primary, retry, and two fallback timeouts (48s). This stays under the Edge Function's 55s gateway timeout. If you add fallbacks or raise these values, keep the total below that limit.
 
 Current routing shape:
 
@@ -183,7 +184,9 @@ carebridge-agent (Gemini)
     ↓ on failure
 carebridge-agent-retry (Gemini, same model)
     ↓ on failure
-carebridge-agent-fallback (OpenRouter)
+carebridge-agent-fallback (OpenRouter, Nvidia)
+    ↓ on failure
+carebridge-agent-fallback-2 (OpenRouter, Qwen, second key)
 ```
 
 LiteLLM `router_settings.fallbacks` handles failover. No custom fallback code exists in `app.py`.
