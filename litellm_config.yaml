@@ -2,20 +2,29 @@
 # The application only calls `carebridge-agent`. Each deployment has its own
 # model group so routing is deterministic: Gemini always serves first and the
 # fallback group is used only when the primary fails.
-# Worst case per request: primary timeout + fallback timeout. Keep the total
+# Worst case per request: primary + retry + fallback timeouts. Keep the total
 # below the Edge Function's 55s gateway timeout.
 model_list:
   - model_name: carebridge-agent
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY
-      timeout: 20
+      timeout: 15
+
+  # Same Gemini model as a separate group, tried once before the non-Gemini
+  # fallback. Gemini often returns short-lived 503 "high demand" errors, and a
+  # Gemini answer keeps the thought signatures needed for later tool rounds.
+  - model_name: carebridge-agent-retry
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY
+      timeout: 15
 
   - model_name: carebridge-agent-fallback
     litellm_params:
       model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
       api_key: os.environ/OPENROUTER_API_KEY
-      timeout: 20
+      timeout: 15
 
   # Embeddings for the RAG corpus. Documents and queries must use this same
   # model and dimension; changing either requires re-embedding the corpus.
@@ -29,7 +38,7 @@ model_list:
 router_settings:
   num_retries: 0
   fallbacks:
-    - carebridge-agent: ["carebridge-agent-fallback"]
+    - carebridge-agent: ["carebridge-agent-retry", "carebridge-agent-fallback"]
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
