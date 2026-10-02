@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  config:
+    name: Check gateway config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "pyyaml>=6.0.3,<7.0"
+      - name: Compile app.py
+        run: python -m py_compile app.py
+      - name: Validate litellm_config.yaml
+        shell: python
+        run: |
+          import sys
+          import yaml
+
+          with open("litellm_config.yaml", encoding="utf8") as f:
+              config = yaml.safe_load(f)
+
+          errors = []
+          models = config.get("model_list") or []
+          if not models:
+              errors.append("model_list is empty")
+          for entry in models:
+              name = entry.get("model_name")
+              params = entry.get("litellm_params") or {}
+              if not name:
+                  errors.append(f"entry without model_name: {entry}")
+              if not params.get("model"):
+                  errors.append(f"{name}: litellm_params.model is missing")
+              # Keys must come from the environment, never be written into the file.
+              for key, value in params.items():
+                  if "key" in key.lower() and isinstance(value, str) and not value.startswith("os.environ/"):
+                      errors.append(f"{name}: {key} is not read from os.environ/")
+
+          for error in errors:
+              print(f"::error::{error}")
+          print(f"{len(models)} models checked, {len(errors)} problems")
+          sys.exit(1 if errors else 0)
