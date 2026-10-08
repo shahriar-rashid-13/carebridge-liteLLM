@@ -1,240 +1,254 @@
 # CareBridge LiteLLM Gateway
 
-Small model gateway for the CareBridge AI assistant (v2 and v3). It exposes one OpenAI-compatible API and hides provider details from the CareBridge application.
+CareBridge's server-only model gateway. It presents a single OpenAI-compatible API to the CareBridge backend while keeping provider credentials, provider model names, and failover policy out of the clinic application.
 
-- Live: https://carebridge-lite-llm.vercel.app (server-to-server only, master key required)
-- Whole-project report and system overview: `../FINAL_REPORT.md` and `../docs/PROJECT_OVERVIEW.md`
+## Related projects and documentation
+
+- [CareBridge clinic application](https://github.com/shahriar-rashid-13/carebridge-clinic-flow) · [deployed application](https://carebridge-clinic-flow.vercel.app/)
+- [CareBridge RAG, search evaluation, and no-show model](https://github.com/shahriar-rashid-13/carebridge-rag)
+- [Gateway deployment](https://carebridge-lite-llm.vercel.app/) (server-to-server; a master key is required)
+- [Assessment 2 report](https://github.com/shahriar-rashid-13/carebridge-clinic-flow/blob/main/docs/assessment-2/ASSESSMENT_2_REPORT.md)
+- [Assessment 3 report](https://github.com/shahriar-rashid-13/carebridge-clinic-flow/blob/main/docs/assessment-3/ASSESSMENT_3_REPORT.md)
+- [Complete project report](https://github.com/shahriar-rashid-13/carebridge-clinic-flow/blob/main/docs/FINAL_PROJECT_REPORT.md)
+- [Project overview](https://github.com/shahriar-rashid-13/carebridge-clinic-flow/blob/main/docs/PROJECT_OVERVIEW.md)
+
+## Responsibility boundary
+
+This service is deliberately narrow. It owns:
+
+- stable CareBridge model aliases;
+- provider API credentials;
+- OpenAI-compatible chat and embedding endpoints;
+- provider selection, timeouts, and fallback order;
+- master-key authentication at the gateway.
+
+It does **not** authenticate clinic users, authorize roles, connect to Supabase, execute SQL or tools, enforce clinic business rules, or accept browser traffic. Those responsibilities remain in the CareBridge Supabase Edge Functions. The browser calls an authenticated Edge Function with the user's JWT; the Edge Function calls this gateway with a separate server secret.
 
 ```text
-CareBridge Frontend
-        ↓
-Supabase Edge Function carebridge-ai-v2
-        ↓
-LiteLLM (this project)
-        ↓
-Chat:       Gemini, then Gemini on the second key, then OpenRouter Nvidia, then OpenRouter Qwen
-Embeddings: Gemini embedding-001 (RAG queries and corpus upload from carebridge-rag), then the same model on the second key
-Judge:      Gemini 3.5 Flash for evaluations only (second key, then first key)
+Browser
+  │ user JWT
+  ▼
+CareBridge Supabase Edge Function
+  ├─ carebridge-ai-v2: Assessment 2 single-agent baseline
+  └─ carebridge-ai-v3: Assessment 3 supervisor and specialist agents
+       │ LITELLM_API_KEY
+       ▼
+This LiteLLM gateway
+  ├─ Gemini chat and embeddings
+  └─ OpenRouter chat fallbacks
+
+carebridge-rag scripts ── LITELLM_MASTER_KEY ──► gateway
+  ├─ corpus embedding and Assessment 2 RAG evaluation
+  ├─ classification
+  └─ Assessment 3 answer, reranking, and judge evaluation
 ```
 
-This is a separate project because authentication, roles, tool execution, business rules, and Supabase access belong in the Supabase Edge Function. LiteLLM only handles model/provider abstraction, the application model aliases, provider credentials, and fallback routing.
+Both v2 and v3 use the gateway client implemented in `carebridge-ai-v2/gateway.ts`. They call `carebridge-agent` for chat and tool calling. After a non-Gemini fallback answers a tool-call round, the caller uses `carebridge-agent-fallback` for the remaining rounds so Gemini is not given tool history without Gemini thought signatures. v2 also uses `carebridge-embed` for its Gemini-based knowledge search. v3 uses its own gte-small query embeddings, but still uses this gateway for supervision, specialist calls, and model reranking.
 
-LiteLLM must never connect to Supabase, authenticate CareBridge users, execute tools or SQL, or receive browser traffic.
+## Models and routing
 
-Callers:
+`litellm_config.yaml` is the source of truth. Each provider deployment has a separate model group so LiteLLM follows an explicit fallback chain instead of load-balancing across keys.
 
-- the Edge Function `carebridge-ai-v2`: `POST /chat/completions` with `model = "carebridge-agent"`, and `POST /embeddings` with `model = "carebridge-embed"` for `search_knowledge`;
-- the `carebridge-rag` upload script: `POST /embeddings` with `model = "carebridge-embed"`.
+| Model group | Provider model | Key | Timeout | Purpose |
+| --- | --- | --- | ---: | --- |
+| `carebridge-agent` | `gemini/gemini-3.1-flash-lite` | `GEMINI_API_KEY` | 12 s | Primary application chat and tool calling |
+| `carebridge-agent-retry` | `gemini/gemini-3.1-flash-lite` | `SECOND_GEMINI_API_KEY` | 12 s | Same-model retry on a second quota |
+| `carebridge-agent-fallback` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` | `OPENROUTER_API_KEY` | 12 s | First non-Gemini chat fallback |
+| `carebridge-agent-fallback-2` | `openrouter/qwen/qwen3.8-27b:free` | `OPENROUTER_API_KEY_2` | 12 s | Final chat fallback; reasoning is disabled to fit the timeout |
+| `carebridge-embed` | `gemini/gemini-embedding-001` | `GEMINI_API_KEY` | 20 s | Primary 768-dimensional corpus and query embeddings |
+| `carebridge-embed-2` | `gemini/gemini-embedding-001` | `SECOND_GEMINI_API_KEY` | 20 s | Compatible embedding fallback |
+| `carebridge-judge` | `gemini/gemini-3.5-flash` | `SECOND_GEMINI_API_KEY` | 30 s | Evaluation judge; not an application model |
+| `carebridge-judge-2` | `gemini/gemini-3.5-flash` | `GEMINI_API_KEY` | 30 s | Judge fallback |
 
-Every response carries the header `x-litellm-model-group`. The Edge Function reads it to record whether a fallback model answered.
+The configured fallback routes are:
 
-## Current configuration
+```text
+carebridge-agent
+  → carebridge-agent-retry
+  → carebridge-agent-fallback
+  → carebridge-agent-fallback-2
 
-| Model group | Provider model | Role |
+carebridge-agent-fallback → carebridge-agent-fallback-2
+carebridge-embed          → carebridge-embed-2
+carebridge-judge          → carebridge-judge-2
+```
+
+`router_settings.num_retries` is `0`; failover comes from these routes, not an additional retry loop. A fully exhausted chat chain can consume up to 48 seconds of configured provider timeout, embeddings up to 40 seconds, and judge calls up to 60 seconds, excluding routing and network overhead. The v2 and v3 agent callers allow at most 55 seconds for one gateway call; v3's supervisor and reranker use shorter 25-second and 6-second caller deadlines.
+
+Use Gemini keys from separate Google projects if the goal is independent project-level quota. The cross-key test verifies that the currently pinned LiteLLM release preserves Gemini thought signatures across a two-key tool round.
+
+## API
+
+LiteLLM supplies the API; `app.py` adds no custom routes or middleware. CareBridge currently uses the unprefixed routes below. LiteLLM also exposes their `/v1` equivalents for OpenAI SDK compatibility.
+
+| Method | Route | CareBridge use |
 | --- | --- | --- |
-| `carebridge-agent` | `gemini/gemini-3.1-flash-lite` | Primary (called by the application) |
-| `carebridge-agent-retry` | `gemini/gemini-3.1-flash-lite` (key `SECOND_GEMINI_API_KEY`) | First fallback: one Gemini retry on a separate free-tier quota, for 503 "high demand" and 429 quota errors |
-| `carebridge-agent-fallback` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` | Second fallback |
-| `carebridge-agent-fallback-2` | `openrouter/qwen/qwen3.8-27b:free` (key `OPENROUTER_API_KEY_2`) | Last fallback |
-| `carebridge-embed` | `gemini/gemini-embedding-001` (768 dimensions) | Embeddings for the RAG corpus and queries (`/embeddings`) |
-| `carebridge-embed-2` | `gemini/gemini-embedding-001` (768 dimensions, key `SECOND_GEMINI_API_KEY`) | Embedding fallback; same vectors as the primary (cosine 1.0000) |
-| `carebridge-judge` | `gemini/gemini-3.5-flash` (key `SECOND_GEMINI_API_KEY`) | LLM-as-judge for evaluations only; a different model from the answer model |
-| `carebridge-judge-2` | `gemini/gemini-3.5-flash` (key `GEMINI_API_KEY`) | Judge fallback |
+| `POST` | `/chat/completions` or `/v1/chat/completions` | Chat, tools, classification, reranking, and evaluation |
+| `POST` | `/embeddings` or `/v1/embeddings` | Gemini embeddings |
+| `GET` | `/models` or `/v1/models` | Authenticated model discovery |
 
-Both Gemini keys must come from different Google Cloud projects, because free-tier quotas are per project. Gemini thought signatures work across the two keys: a tool round started on one key continues on the other (`tests/test_second_key.mjs`).
+Authenticate every request with:
 
-`litellm_config.yaml` is the routing source of truth. It contains no credentials. Each deployment has its own model group, and `router_settings.fallbacks` sends a failed `carebridge-agent` request to `carebridge-agent-retry`, then `carebridge-agent-fallback`, then `carebridge-agent-fallback-2`. A failed direct `carebridge-agent-fallback` request goes to `carebridge-agent-fallback-2`. Do not put both deployments under one model group: LiteLLM then load-balances between them instead of treating one as a fallback.
+```http
+Authorization: Bearer <LITELLM_MASTER_KEY>
+Content-Type: application/json
+```
 
-Test a tool round-trip on both model groups with `tests/test_tool_roundtrip.ps1`. Gemini 3 tool calling needs thought signatures passed back between steps; LiteLLM 1.103.0 handles this, older pins may not.
+Chat example:
 
-## Windows setup
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"carebridge-agent","messages":[{"role":"user","content":"Hello"}]}'
+```
 
-Open PowerShell in this directory:
+Embedding example:
+
+```bash
+curl http://localhost:4000/v1/embeddings \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"carebridge-embed","input":"clinic opening hours"}'
+```
+
+LiteLLM adds routing metadata to model responses. CareBridge reads:
+
+- `x-litellm-model-group` to identify the group that served the response;
+- `x-litellm-attempted-fallbacks` as a compatibility fallback when the served group is unavailable.
+
+The Edge Function treats `carebridge-agent` and `carebridge-agent-retry` as Gemini groups. Any other served chat group is recorded as a non-Gemini fallback.
+
+## Local development
+
+Python 3.12 matches CI. From this repository:
+
+### Windows PowerShell
 
 ```powershell
-py -3 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-If your prompt starts with `C:\...>` instead of `PS C:\...>`, you are using
-Command Prompt. Use these equivalent commands there:
-
-```bat
-rmdir /s /q .venv
-py -3 -m venv .venv
-.venv\Scripts\activate.bat
 python -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-Confirm the virtual environment is active before installing:
-
-```bat
-where python
-```
-
-The first result must be
-`...\carebridge-liteLLM\.venv\Scripts\python.exe`.
-
-If PowerShell blocks activation, run:
+If PowerShell blocks activation, allow it for the current process only:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-Open `.env` and set real local values:
+### macOS or Linux
 
-```text
-GEMINI_API_KEY=your Google AI Studio key
-SECOND_GEMINI_API_KEY=a Google AI Studio key from a second project
-OPENROUTER_API_KEY=your OpenRouter key (Nvidia fallback)
-OPENROUTER_API_KEY_2=a second OpenRouter key (Qwen fallback)
-LITELLM_MASTER_KEY=sk-a-long-random-client-key
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cp .env.example .env
 ```
 
-Generate a proxy key with Python:
+Fill in `.env`, then start the proxy:
 
-```bat
-python -c "import secrets; print('sk-' + secrets.token_urlsafe(32))"
-```
-
-Copy generated value into `LITELLM_MASTER_KEY`. Create this key yourself.
-LiteLLM does not issue it.
-
-Keep all keys server-side. `LITELLM_MASTER_KEY` authenticates clients to LiteLLM. The provider keys authenticate LiteLLM to Gemini and OpenRouter. Never use one as another. Never commit `.env`.
-
-## Start locally
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-$env:PYTHONUTF8 = "1"
+```bash
 litellm --config litellm_config.yaml --port 4000
 ```
 
-Server URL: `http://localhost:4000`
+The local URL is `http://localhost:4000`. The CLI receives the config path explicitly. `app.py`, used by an ASGI deployment, loads `.env` and exports LiteLLM's `app`.
 
-The LiteLLM CLI loads `.env` for local development. The `app.py` entry point also loads `.env` and exposes `app` for the Vercel deployment.
+The dependency list pins LiteLLM to `1.103.0` and installs the proxy extras explicitly instead of using `litellm[proxy]`; the comments in `requirements.txt` document this as a Vercel bundle-size decision.
 
-## Test locally
+## Environment variables
 
-Keep the proxy terminal running. In a second PowerShell terminal:
+Gateway runtime variables:
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | Yes | Primary Gemini chat and embedding key |
+| `SECOND_GEMINI_API_KEY` | Yes | Second Gemini key for chat, embedding, and judge failover |
+| `OPENROUTER_API_KEY` | Yes | Nvidia fallback key |
+| `OPENROUTER_API_KEY_2` | Yes | Qwen fallback key |
+| `LITELLM_MASTER_KEY` | Yes | Client-facing gateway secret; create this value yourself |
+| `CONFIG_FILE_PATH` | ASGI deployment | Path from which LiteLLM loads `litellm_config.yaml`; see deployment notes |
+
+Generate a master key locally:
+
+```bash
+python -c "import secrets; print('sk-' + secrets.token_urlsafe(32))"
+```
+
+Variables belong to callers, not this gateway:
+
+- Supabase Edge Functions use `LITELLM_BASE_URL` and `LITELLM_API_KEY`; the latter contains the same secret value as the gateway's `LITELLM_MASTER_KEY`.
+- Local `carebridge-rag` scripts use `LITELLM_BASE_URL` and `LITELLM_MASTER_KEY`, alongside their Supabase variables.
+- `tests/test_proxy.py` optionally uses `LITELLM_BASE_URL` and otherwise defaults to `http://localhost:4000`.
+
+## Tests
+
+Start the gateway before running the live checks.
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
 python tests\test_proxy.py
+node tests\test_second_key.mjs
+.\tests\test_tool_roundtrip.ps1 -Gateway http://localhost:4000
 ```
 
-The test client loads `LITELLM_MASTER_KEY` from `.env`.
+Test scope:
 
-The test checks:
+- `test_proxy.py` is an asserting smoke test for authenticated model discovery, rejection of a bad key and bad alias, and a real OpenAI-shaped chat completion.
+- `test_second_key.mjs` exercises cross-key Gemini tool rounds, both embedding groups, and both judge groups. It is a diagnostic script: individual failures are printed rather than converted into a failing process exit.
+- `test_tool_roundtrip.ps1` exercises a two-step tool call on the primary and direct fallback groups. It also reports failures as output rather than acting as a strict test runner.
 
-- `GET /models`
-- visible `carebridge-agent` alias
-- invalid proxy key rejection
-- invalid model alias rejection
-- authenticated `POST /chat/completions`
-- OpenAI-compatible response shape
-- actual Gemini response
+The GitHub Actions workflow runs on pushes to `main` and on pull requests. It uses Python 3.12 to:
 
-Manual request:
+1. compile `app.py`;
+2. parse `litellm_config.yaml`;
+3. require a non-empty model list and provider model names;
+4. reject key-like YAML values that do not use `os.environ/...`.
 
-```powershell
-$headers = @{
-  Authorization = "Bearer $env:LITELLM_MASTER_KEY"
-  "Content-Type" = "application/json"
-}
-$body = @{
-  model = "carebridge-agent"
-  messages = @(
-    @{
-      role = "user"
-      content = "Explain in one sentence that you run through the CareBridge LiteLLM gateway."
-    }
-  )
-} | ConvertTo-Json -Depth 5
+CI does **not** install the full application requirements, start LiteLLM, contact providers, run the live scripts, validate fallback behavior, or deploy Vercel.
 
-Invoke-RestMethod http://localhost:4000/chat/completions -Method Post -Headers $headers -Body $body
-```
+## Vercel deployment assumptions
 
-Model discovery:
+The repository contains an ASGI entry point but no `vercel.json`. `app.py` only loads dotenv and exports `litellm.proxy.proxy_server.app`; it does not pass a config file to LiteLLM in code. Therefore an ASGI deployment must:
 
-```powershell
-Invoke-RestMethod http://localhost:4000/models -Headers @{
-  Authorization = "Bearer $env:LITELLM_MASTER_KEY"
-}
-```
+1. package `app.py`, `litellm_config.yaml`, and the installed requirements;
+2. route requests to the exported `app`;
+3. set the five secret variables listed above;
+4. set `CONFIG_FILE_PATH` to a deployment-resolvable path for `litellm_config.yaml` (for example `litellm_config.yaml` when the function working directory is the repository root);
+5. allow enough execution time for the intended fallback chain and caller deadline.
 
-`/models` should list `carebridge-agent`. LiteLLM may also expose the same resource at `/v1/models`.
+Framework selection, route mapping, build commands, function duration, regions, Git integration, and automatic redeployment are Vercel project settings and are not tracked in this repository. Verify them in the Vercel project rather than treating them as repository guarantees.
 
-## Error checks
+Do not expose the gateway URL and master key to browser code. Store them in Supabase Edge Function secrets and in the local, ignored RAG environment file only.
 
-| Check | Expected result |
-| --- | --- |
-| Omit `Authorization` or use another key | HTTP 400/401/403 |
-| Use unknown model alias | HTTP 400/404/422 |
-| Remove `GEMINI_API_KEY`, restart, then call alias | Provider/configuration error; no Gemini response |
-| Set an invalid `GEMINI_API_KEY`, restart, then call alias | Gemini authentication/provider error |
+## Security and operational limits
 
-Provider errors remain visible in local LiteLLM logs. Do not replace them with custom generic middleware.
+- `.env` is ignored; `.env.example` contains names and placeholders only.
+- Provider keys authenticate this gateway to providers. `LITELLM_MASTER_KEY` authenticates trusted callers to this gateway. They are separate trust boundaries and must not be reused.
+- Rotate any key that appears in source, logs, screenshots, browser bundles, or chat transcripts.
+- Tool requests are model output only. The Edge Function validates tool names and arguments, executes authorized operations with the caller's context, and returns tool results.
+- The configured provider models use free endpoints or quota-constrained keys. Availability, rate limits, model continuity, and latency are not guaranteed.
+- Cold starts and routing overhead are outside the per-provider timeouts.
+- Changing the embedding model or its 768 dimensions requires re-embedding every vector that will be compared with it.
+- There is no persistence, response cache, rate limiter, database, or custom observability code in this repository.
+- `docs/history/CAREBRIDGE_GATEWAY_CONTEXT.md` predates the current second-key and Assessment 3 configuration; use it as historical context, not current configuration.
 
-## Vercel deployment
-
-The gateway is deployed on Vercel using `app.py` as the Python entry point and this config file. Deployment rules:
-
-- `GEMINI_API_KEY`, `SECOND_GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENROUTER_API_KEY_2`, and `LITELLM_MASTER_KEY` are Vercel server environment variables;
-- pushing to `main` redeploys the gateway automatically;
-- use a strong `sk-` proxy key and rotate it if exposed;
-- the Vercel function max duration must be at least 60s (the Edge Function aborts gateway calls after 55s);
-- keep the gateway URL and key only in the Supabase Edge Function secrets (`LITELLM_BASE_URL`, `LITELLM_API_KEY`) and the local `carebridge-rag/.env`;
-- never call the gateway directly from the browser.
-
-`mock_testing_fallbacks` is disabled on the deployed proxy, so fallback behaviour is checked with real calls and the `x-litellm-model-group` response header.
-
-Known limits: all providers are free tiers, so quotas can run out (Gemini embeddings allow about 1,000 per day per project). Cold starts after idle add a few seconds to the first request.
-
-## Timeouts and retries
-
-Each chat deployment has `timeout: 12` seconds and `router_settings.num_retries: 0`, so the worst case is primary, retry, and two fallback timeouts (48s). This stays under the Edge Function's 55s gateway timeout. If you add fallbacks or raise these values, keep the total below that limit.
-
-Current routing shape:
-
-```text
-carebridge-agent (Gemini)
-    ↓ on failure
-carebridge-agent-retry (Gemini, same model, second key)
-    ↓ on failure
-carebridge-agent-fallback (OpenRouter, Nvidia)
-    ↓ on failure
-carebridge-agent-fallback-2 (OpenRouter, Qwen, second key)
-```
-
-LiteLLM `router_settings.fallbacks` handles failover. No custom fallback code exists in `app.py`.
-
-## Project structure
+## Repository map
 
 ```text
 carebridge-liteLLM/
-├── app.py
-├── litellm_config.yaml
-├── requirements.txt
-├── .env
-├── .env.example
-├── .gitignore
+├── .github/workflows/ci.yml          # static config and syntax checks
+├── .env.example                      # local secret-name template
+├── app.py                            # minimal ASGI/Vercel entry point
+├── litellm_config.yaml               # models, credentials, timeouts, fallbacks
+├── requirements.txt                  # pinned LiteLLM and proxy dependencies
 ├── README.md
-├── docs/
-│   └── history/CAREBRIDGE_GATEWAY_CONTEXT.md   (design context from 28 Sep; predates the second Gemini key)
+├── docs/history/
+│   └── CAREBRIDGE_GATEWAY_CONTEXT.md # historical design handoff
 └── tests/
-    ├── test_proxy.py
-    ├── test_second_key.mjs
-    └── test_tool_roundtrip.ps1
+    ├── test_proxy.py                 # asserting live smoke client
+    ├── test_second_key.mjs           # cross-key and auxiliary-group diagnostics
+    └── test_tool_roundtrip.ps1       # primary/fallback tool-round diagnostics
 ```
-
-## Security rules
-
-- No CareBridge database, Supabase client, Postgres, Redis, or clinic tools belong here.
-- No provider key is hardcoded.
-- `.env` is ignored by Git.
-- `LITELLM_MASTER_KEY` and the provider keys (`GEMINI_API_KEY`, `SECOND_GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENROUTER_API_KEY_2`) are different secrets.
-- The proxy requires the master key and must stay server-to-server.
-- LiteLLM returns model output and tool-call requests; the Edge Function validates and executes tools.
