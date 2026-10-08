@@ -1,9 +1,9 @@
 # CareBridge LiteLLM Gateway
 
-Small model gateway for CareBridge AI V2. It exposes one OpenAI-compatible API and hides provider details from the CareBridge application.
+Small model gateway for the CareBridge AI assistant (v2 and v3). It exposes one OpenAI-compatible API and hides provider details from the CareBridge application.
 
 - Live: https://carebridge-lite-llm.vercel.app (server-to-server only, master key required)
-- Whole-system overview: `../PROJECT_OVERVIEW.md`
+- Whole-project report and system overview: `../FINAL_REPORT.md` and `../docs/PROJECT_OVERVIEW.md`
 
 ```text
 CareBridge Frontend
@@ -222,7 +222,8 @@ carebridge-liteLLM/
 ├── .env.example
 ├── .gitignore
 ├── README.md
-├── CAREBRIDGE_GATEWAY_CONTEXT.md
+├── docs/
+│   └── history/CAREBRIDGE_GATEWAY_CONTEXT.md   (design context from 28 Sep; predates the second Gemini key)
 └── tests/
     ├── test_proxy.py
     ├── test_second_key.mjs
