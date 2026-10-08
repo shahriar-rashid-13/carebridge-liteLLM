@@ -12,8 +12,9 @@ Supabase Edge Function carebridge-ai-v2
         ↓
 LiteLLM (this project)
         ↓
-Chat:       Gemini, then Gemini retry, then OpenRouter Nvidia, then OpenRouter Qwen
-Embeddings: Gemini embedding-001 (RAG queries and corpus upload from carebridge-rag)
+Chat:       Gemini, then Gemini on the second key, then OpenRouter Nvidia, then OpenRouter Qwen
+Embeddings: Gemini embedding-001 (RAG queries and corpus upload from carebridge-rag), then the same model on the second key
+Judge:      Gemini 3.5 Flash for evaluations only (second key, then first key)
 ```
 
 This is a separate project because authentication, roles, tool execution, business rules, and Supabase access belong in the Supabase Edge Function. LiteLLM only handles model/provider abstraction, the application model aliases, provider credentials, and fallback routing.
@@ -32,10 +33,15 @@ Every response carries the header `x-litellm-model-group`. The Edge Function rea
 | Model group | Provider model | Role |
 | --- | --- | --- |
 | `carebridge-agent` | `gemini/gemini-3.1-flash-lite` | Primary (called by the application) |
-| `carebridge-agent-retry` | `gemini/gemini-3.1-flash-lite` | First fallback: one Gemini retry for short-lived 503 "high demand" errors |
+| `carebridge-agent-retry` | `gemini/gemini-3.1-flash-lite` (key `SECOND_GEMINI_API_KEY`) | First fallback: one Gemini retry on a separate free-tier quota, for 503 "high demand" and 429 quota errors |
 | `carebridge-agent-fallback` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` | Second fallback |
 | `carebridge-agent-fallback-2` | `openrouter/qwen/qwen3.8-27b:free` (key `OPENROUTER_API_KEY_2`) | Last fallback |
 | `carebridge-embed` | `gemini/gemini-embedding-001` (768 dimensions) | Embeddings for the RAG corpus and queries (`/embeddings`) |
+| `carebridge-embed-2` | `gemini/gemini-embedding-001` (768 dimensions, key `SECOND_GEMINI_API_KEY`) | Embedding fallback; same vectors as the primary (cosine 1.0000) |
+| `carebridge-judge` | `gemini/gemini-3.5-flash` (key `SECOND_GEMINI_API_KEY`) | LLM-as-judge for evaluations only; a different model from the answer model |
+| `carebridge-judge-2` | `gemini/gemini-3.5-flash` (key `GEMINI_API_KEY`) | Judge fallback |
+
+Both Gemini keys must come from different Google Cloud projects, because free-tier quotas are per project. Gemini thought signatures work across the two keys: a tool round started on one key continues on the other (`tests/test_second_key.mjs`).
 
 `litellm_config.yaml` is the routing source of truth. It contains no credentials. Each deployment has its own model group, and `router_settings.fallbacks` sends a failed `carebridge-agent` request to `carebridge-agent-retry`, then `carebridge-agent-fallback`, then `carebridge-agent-fallback-2`. A failed direct `carebridge-agent-fallback` request goes to `carebridge-agent-fallback-2`. Do not put both deployments under one model group: LiteLLM then load-balances between them instead of treating one as a fallback.
 
@@ -81,6 +87,7 @@ Open `.env` and set real local values:
 
 ```text
 GEMINI_API_KEY=your Google AI Studio key
+SECOND_GEMINI_API_KEY=a Google AI Studio key from a second project
 OPENROUTER_API_KEY=your OpenRouter key (Nvidia fallback)
 OPENROUTER_API_KEY_2=a second OpenRouter key (Qwen fallback)
 LITELLM_MASTER_KEY=sk-a-long-random-client-key
@@ -175,7 +182,7 @@ Provider errors remain visible in local LiteLLM logs. Do not replace them with c
 
 The gateway is deployed on Vercel using `app.py` as the Python entry point and this config file. Deployment rules:
 
-- `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENROUTER_API_KEY_2`, and `LITELLM_MASTER_KEY` are Vercel server environment variables;
+- `GEMINI_API_KEY`, `SECOND_GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENROUTER_API_KEY_2`, and `LITELLM_MASTER_KEY` are Vercel server environment variables;
 - pushing to `main` redeploys the gateway automatically;
 - use a strong `sk-` proxy key and rotate it if exposed;
 - the Vercel function max duration must be at least 60s (the Edge Function aborts gateway calls after 55s);
@@ -195,7 +202,7 @@ Current routing shape:
 ```text
 carebridge-agent (Gemini)
     ↓ on failure
-carebridge-agent-retry (Gemini, same model)
+carebridge-agent-retry (Gemini, same model, second key)
     ↓ on failure
 carebridge-agent-fallback (OpenRouter, Nvidia)
     ↓ on failure
@@ -218,6 +225,7 @@ carebridge-liteLLM/
 ├── CAREBRIDGE_GATEWAY_CONTEXT.md
 └── tests/
     ├── test_proxy.py
+    ├── test_second_key.mjs
     └── test_tool_roundtrip.ps1
 ```
 
@@ -226,6 +234,6 @@ carebridge-liteLLM/
 - No CareBridge database, Supabase client, Postgres, Redis, or clinic tools belong here.
 - No provider key is hardcoded.
 - `.env` is ignored by Git.
-- `LITELLM_MASTER_KEY` and the provider keys (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENROUTER_API_KEY_2`) are different secrets.
+- `LITELLM_MASTER_KEY` and the provider keys (`GEMINI_API_KEY`, `SECOND_GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENROUTER_API_KEY_2`) are different secrets.
 - The proxy requires the master key and must stay server-to-server.
 - LiteLLM returns model output and tool-call requests; the Edge Function validates and executes tools.

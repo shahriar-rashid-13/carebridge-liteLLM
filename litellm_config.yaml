@@ -11,13 +11,14 @@ model_list:
       api_key: os.environ/GEMINI_API_KEY
       timeout: 12
 
-  # Same Gemini model as a separate group, tried once before the non-Gemini
-  # fallback. Gemini often returns short-lived 503 "high demand" errors, and a
-  # Gemini answer keeps the thought signatures needed for later tool rounds.
+  # Same Gemini model on a second key (separate free-tier quota), tried once
+  # before the non-Gemini fallback. It covers both short-lived 503 "high demand"
+  # errors and 429 quota errors on the first key, and a Gemini answer keeps the
+  # thought signatures needed for later tool rounds.
   - model_name: carebridge-agent-retry
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
-      api_key: os.environ/GEMINI_API_KEY
+      api_key: os.environ/SECOND_GEMINI_API_KEY
       timeout: 12
 
   - model_name: carebridge-agent-fallback
@@ -47,12 +48,37 @@ model_list:
       dimensions: 768
       timeout: 20
 
+  # Same embedding model on the second key, so vectors stay compatible.
+  - model_name: carebridge-embed-2
+    litellm_params:
+      model: gemini/gemini-embedding-001
+      api_key: os.environ/SECOND_GEMINI_API_KEY
+      dimensions: 768
+      timeout: 20
+
+  # LLM-as-judge for evaluations only; never called by the application. A
+  # different Gemini model from the answer model reduces self-grading bias and
+  # draws on a separate per-model quota.
+  - model_name: carebridge-judge
+    litellm_params:
+      model: gemini/gemini-3.5-flash
+      api_key: os.environ/SECOND_GEMINI_API_KEY
+      timeout: 30
+
+  - model_name: carebridge-judge-2
+    litellm_params:
+      model: gemini/gemini-3.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+      timeout: 30
+
 router_settings:
   num_retries: 0
   fallbacks:
     - carebridge-agent: ["carebridge-agent-retry", "carebridge-agent-fallback", "carebridge-agent-fallback-2"]
     # The Edge Function calls the fallback group directly for later tool rounds.
     - carebridge-agent-fallback: ["carebridge-agent-fallback-2"]
+    - carebridge-embed: ["carebridge-embed-2"]
+    - carebridge-judge: ["carebridge-judge-2"]
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
